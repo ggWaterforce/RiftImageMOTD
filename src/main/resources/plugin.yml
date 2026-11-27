@@ -1,0 +1,15 @@
+name: RiftImageMOTD
+version: 1.0.0
+main: com.riftsmp.motd.RiftImageMOTD
+api-version: '26.2'
+description: Ultra-lightweight PNG Image MOTD plugin for Paper 26.2
+
+commands:
+  riftmotd:
+    description: Generate or reload the image MOTD
+    usage: /riftmotd <generate|reload>
+    permission: riftmotd.admin
+
+permissions:
+  riftmotd.admin:
+    default: op
