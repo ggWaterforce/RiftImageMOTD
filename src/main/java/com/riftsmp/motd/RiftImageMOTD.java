@@ -12,6 +12,7 @@ import net.kyori.adventure.text.object.ObjectContents;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -87,7 +88,7 @@ public final class RiftImageMOTD extends JavaPlugin implements Listener {
                 String val = texCfg.getString("tiles." + idx + ".value");
                 String sig = texCfg.getString("tiles." + idx + ".signature");
                 if (val == null || sig == null) {
-                    getLogger().warning("Incomplete textures.yml at tile " + idx + ". Run /riftmotd generate.");
+                    getLogger().warning("Incomplete textures.yml at tile " + idx + ". Run /riftmotd generate to resume.");
                     this.cachedImageMotd = null;
                     return;
                 }
@@ -166,9 +167,27 @@ public final class RiftImageMOTD extends JavaPlugin implements Listener {
                     .connectTimeout(Duration.ofSeconds(15))
                     .build();
 
+            File texFile = new File(getDataFolder(), "textures.yml");
+            YamlConfiguration out = texFile.exists()
+                    ? YamlConfiguration.loadConfiguration(texFile)
+                    : new YamlConfiguration();
+
+            // Load previously saved tiles so we can resume without re-uploading
             Map<String, String[]> dedupCache = new HashMap<>();
-            YamlConfiguration out = new YamlConfiguration();
+            ConfigurationSection tilesSec = out.getConfigurationSection("tiles");
+            if (tilesSec != null) {
+                for (String key : tilesSec.getKeys(false)) {
+                    String h = out.getString("tiles." + key + ".hash");
+                    String v = out.getString("tiles." + key + ".value");
+                    String s = out.getString("tiles." + key + ".signature");
+                    if (h != null && v != null && s != null) {
+                        dedupCache.put(h, new String[]{v, s});
+                    }
+                }
+            }
+
             int uploaded = 0;
+            int reused = 0;
 
             for (int row = 0; row < ROWS; row++) {
                 for (int col = 0; col < COLS; col++) {
@@ -182,28 +201,30 @@ public final class RiftImageMOTD extends JavaPlugin implements Listener {
                         dedupCache.put(hash, tex);
                         uploaded++;
                         if (uploaded % 5 == 0) {
-                            getLogger().info("Uploaded " + uploaded + " unique tiles (tile " + (idx + 1) + "/66)...");
+                            getLogger().info("Uploaded " + uploaded + " new tiles (progress: " + (idx + 1) + "/66)...");
                         }
+                    } else {
+                        reused++;
                     }
 
+                    out.set("tiles." + idx + ".hash", hash);
                     out.set("tiles." + idx + ".value", tex[0]);
                     out.set("tiles." + idx + ".signature", tex[1]);
+                    out.save(texFile);
                 }
             }
 
-            out.save(new File(getDataFolder(), "textures.yml"));
             reloadMotdCache();
-            notifySender(sender, "Done! Uploaded " + uploaded + " unique tiles and applied your Image MOTD.");
+            notifySender(sender, "Done! Uploaded " + uploaded + " new tiles (" + reused + " reused) and applied your Image MOTD.");
         } catch (Exception e) {
-            getLogger().severe("Failed to generate Image MOTD: " + e.getMessage());
-            notifySender(sender, "Generation failed: " + e.getMessage());
+            getLogger().severe("Failed to generate Image MOTD (progress saved): " + e.getMessage());
+            notifySender(sender, "Paused/Failed (progress saved — run /riftmotd generate again to resume): " + e.getMessage());
         } finally {
             generating.set(false);
         }
     }
 
     private byte[] buildSkinTile(BufferedImage banner, int srcX, int srcY) throws Exception {
-        // Place the 8x8 tile on the player head face (x: 8..15, y: 8..15) of a 64x64 transparent skin
         BufferedImage skin = new BufferedImage(64, 64, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = skin.createGraphics();
         g.drawImage(banner, 8, 8, 16, 16, srcX, srcY, srcX + TILE_SIZE, srcY + TILE_SIZE, null);
@@ -221,7 +242,7 @@ public final class RiftImageMOTD extends JavaPlugin implements Listener {
         payload.addProperty("visibility", "unlisted");
         payload.addProperty("variant", "classic");
 
-        for (int attempt = 1; attempt <= 4; attempt++) {
+        for (int attempt = 1; attempt <= 6; attempt++) {
             HttpRequest.Builder req = HttpRequest.newBuilder()
                     .uri(URI.create("https://api.mineskin.org/v2/generate"))
                     .timeout(Duration.ofSeconds(30))
@@ -234,13 +255,21 @@ public final class RiftImageMOTD extends JavaPlugin implements Listener {
             }
 
             HttpResponse<String> res = http.send(req.build(), HttpResponse.BodyHandlers.ofString());
+            int code = res.statusCode();
 
-            if (res.statusCode() == 429) {
-                Thread.sleep(5000L * attempt);
+            if (code == 429 || code >= 500) {
+                // Stop early with a clear message if the hourly quota is exhausted
+                if (code == 429 && res.body().contains("\"hour\"") && res.body().contains("\"remaining\":0")) {
+                    throw new RuntimeException("MineSkin hourly limit reached. Progress is saved—run /riftmotd generate again after the limit resets.");
+                }
+                long waitMs = 8000L * attempt;
+                getLogger().warning("MineSkin temporary error (HTTP " + code + "), retrying in " + (waitMs / 1000) + "s (attempt " + attempt + "/6)...");
+                Thread.sleep(waitMs);
                 continue;
             }
-            if (res.statusCode() < 200 || res.statusCode() >= 300) {
-                throw new RuntimeException("MineSkin HTTP " + res.statusCode() + ": " + res.body());
+
+            if (code < 200 || code >= 300) {
+                throw new RuntimeException("MineSkin HTTP " + code + ": " + res.body());
             }
 
             JsonObject json = JsonParser.parseString(res.body()).getAsJsonObject();
@@ -251,8 +280,7 @@ public final class RiftImageMOTD extends JavaPlugin implements Listener {
             String value = data.get("value").getAsString();
             String signature = data.get("signature").getAsString();
 
-            // Respect MineSkin rate-limit pacing
-            long delayMs = apiKey.isEmpty() ? 3500L : 1500L;
+            long delayMs = apiKey.isEmpty() ? 6500L : 2000L;
             if (json.has("rateLimit") && json.getAsJsonObject("rateLimit").has("delay")) {
                 JsonObject delay = json.getAsJsonObject("rateLimit").getAsJsonObject("delay");
                 if (delay.has("millis")) {
@@ -264,7 +292,7 @@ public final class RiftImageMOTD extends JavaPlugin implements Listener {
             return new String[]{value, signature};
         }
 
-        throw new RuntimeException("MineSkin rate-limited after 4 retries. Add a free API key in config.yml.");
+        throw new RuntimeException("MineSkin stayed busy after 6 retries. Progress is saved—run /riftmotd generate to resume.");
     }
 
     private String sha256(byte[] data) throws Exception {
