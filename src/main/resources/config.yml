@@ -1,0 +1,13 @@
+# Optional free API key from https://mineskin.org/apikey (makes generation faster)
+mineskin-api-key: ""
+
+# Place your 264x16 PNG inside plugins/RiftImageMOTD/
+image-file: "banner.png"
+
+# Minimum client protocol that supports player-head MOTD components (773 = MC 1.21.9)
+min-protocol: 773
+
+# Shown to older ViaVersion clients or before you run /riftmotd generate
+fallback-motd: |
+  <#6D28D9><bold>━</bold></#6D28D9> <gradient:#FFFFFF:#C4A7FF><bold>RIFT</bold></gradient> <gradient:#C4A7FF:#8B3DFF><bold>SMP</bold></gradient> <#6D28D9><bold>━</bold></#6D28D9> <gray>| <white>Economy SMP
+  <#C4A7FF>Java & Bedrock <dark_gray>• <#8B3DFF>Join the adventure!
